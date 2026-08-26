@@ -646,6 +646,12 @@ def _format_exec_approval_fallback(
 
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
+    lowered = str(text or "").lower()
+    if any(marker in lowered for marker in ("too many open files", "errno 24", "emfile", "enfile")):
+        return (
+            "⚠️ Local resource limit reached (file descriptors exhausted). "
+            "The gateway stopped provider retries; restart/health recovery is required."
+        )
     if _GATEWAY_AUTH_ERROR_RE.search(text):
         return (
             "⚠️ Provider authentication failed. Check the configured credentials; "

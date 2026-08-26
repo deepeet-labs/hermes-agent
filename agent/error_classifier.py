@@ -46,6 +46,7 @@ class FailoverReason(enum.Enum):
     # Retrying reproduces the identical handshake failure, so fail fast
     # with actionable guidance instead of burning retries.
     ssl_cert_verification = "ssl_cert_verification"
+    local_resource_exhaustion = "local_resource_exhaustion"  # EMFILE/ENFILE — fail fast; retries consume more fds
 
     # Context / payload
     context_overflow = "context_overflow"  # Context too large — compress, not failover
@@ -717,6 +718,24 @@ def classify_api_error(
         return ClassifiedError(**defaults)
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # Local file-descriptor exhaustion is not a provider failure. Retrying the
+    # same request opens more sockets/files and accelerates the outage, while a
+    # fallback provider cannot help because it shares the same process limit.
+    # Keep this ahead of transport heuristics, which would otherwise classify a
+    # socket-open failure as retryable.
+    if (
+        isinstance(error, OSError)
+        and getattr(error, "errno", None) in {23, 24}
+    ) or any(
+        marker in error_msg
+        for marker in ("too many open files", "errno 24", "emfile", "enfile")
+    ):
+        return _result(
+            FailoverReason.local_resource_exhaustion,
+            retryable=False,
+            should_fallback=False,
+        )
 
     # Provider content-policy / safety-filter block. The provider has made a
     # deterministic refusal decision about THIS prompt — retrying unchanged

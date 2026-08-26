@@ -56,6 +56,7 @@ class TestFailoverReason:
             "upstream_rate_limit",
             "overloaded", "server_error", "timeout",
             "ssl_cert_verification",
+            "local_resource_exhaustion",
             "context_overflow", "payload_too_large", "image_too_large",
             "model_not_found", "format_error",
             "invalid_encrypted_content",
@@ -1080,6 +1081,27 @@ class TestExpandedOverflowPatterns:
         )
         result = classify_api_error(e, provider="openrouter", model="m")
         assert result.reason == FailoverReason.context_overflow
+
+
+class TestLocalResourceExhaustion:
+    def test_emfile_oserror_is_non_retryable_and_never_falls_back(self):
+        result = classify_api_error(
+            OSError(24, "Too many open files"),
+            provider="openai-codex",
+            model="gpt-test",
+        )
+
+        assert result.reason == FailoverReason.local_resource_exhaustion
+        assert result.retryable is False
+        assert result.should_fallback is False
+
+    def test_wrapped_errno_24_text_is_also_classified(self):
+        result = classify_api_error(
+            RuntimeError("HTTP transport failed: [Errno 24] Too many open files")
+        )
+
+        assert result.reason == FailoverReason.local_resource_exhaustion
+        assert result.retryable is False
 
 
 

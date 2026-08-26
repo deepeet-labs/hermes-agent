@@ -5507,14 +5507,20 @@ def run_conversation(
                     # exists; otherwise "trying fallback..." is a lie and the
                     # session looks like it's recovering when it's about to
                     # abort silently (#35314, #17446).
-                    if agent._has_pending_fallback():
+                    if (
+                        classified.reason != FailoverReason.local_resource_exhaustion
+                        and agent._has_pending_fallback()
+                    ):
                         if classified.reason == FailoverReason.content_policy_blocked:
                             agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
                         elif classified.reason == FailoverReason.ssl_cert_verification:
                             agent._buffer_status("⚠️ TLS certificate verification failed — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if (
+                        classified.reason != FailoverReason.local_resource_exhaustion
+                        and agent._try_activate_fallback()
+                    ):
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
@@ -5535,7 +5541,12 @@ def run_conversation(
                     # it verbatim (e.g. a cron failure notification dumped a
                     # ~60KB Cloudflare challenge page as 31 Discord messages).
                     _nonretryable_summary = agent._summarize_api_error(api_error)
-                    if classified.reason == FailoverReason.content_policy_blocked:
+                    if classified.reason == FailoverReason.local_resource_exhaustion:
+                        agent._emit_status(
+                            "❌ Local resource limit reached (file descriptors exhausted) — "
+                            "stopping retries; restart the gateway and inspect fd growth."
+                        )
+                    elif classified.reason == FailoverReason.content_policy_blocked:
                         agent._emit_status(
                             f"❌ Provider safety filter blocked this request: "
                             f"{_nonretryable_summary}"

@@ -316,6 +316,17 @@ def test_telegram_final_response_keeps_normal_answers():
     assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
 
 
+def test_telegram_final_response_classifies_fd_exhaustion_as_local_resource_error():
+    """EMFILE must never be misreported as a model-provider outage."""
+    raw = "❌ API failed after 3 retries — [Errno 24] Too many open files"
+
+    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, raw)
+
+    assert "local resource limit" in sanitized.lower()
+    assert "file descriptors exhausted" in sanitized.lower()
+    assert "model provider failed" not in sanitized.lower()
+
+
 # Synthetic credential shapes from #23810. Bodies are placeholder gibberish —
 # never real tokens — but they match the canonical redaction patterns. The
 # outbound gateway redactor previously used a narrow local pattern subset that
