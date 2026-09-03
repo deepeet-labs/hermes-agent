@@ -1924,8 +1924,8 @@ class DiscordAdapter(BasePlatformAdapter):
         fingerprint: str,
         message: Any,
         create_thread: Callable[[], Any],
-    ) -> Optional[Any]:
-        """Atomically claim one incident-thread creation per fingerprint."""
+    ) -> tuple[Optional[Any], bool]:
+        """Atomically resolve one incident thread and report whether it was reused."""
         scope = self._heimdall_incident_scope()
         store = getattr(self, "_heimdall_incident_store", None)
         if (
@@ -1934,30 +1934,55 @@ class DiscordAdapter(BasePlatformAdapter):
             or store is None
             or not getattr(store, "is_healthy", False)
         ):
-            return None
+            return None, False
         claim_lock = _heimdall_incident_claim_lock(store._path, fingerprint, scope)
         async with claim_lock:
             async with store.claim(fingerprint, scope) as claimed:
                 if not claimed or not store.reread():
-                    return None
+                    return None, False
                 existing = await self._resolve_heimdall_incident_thread(fingerprint, message)
                 if existing is not None:
                     self._threads.mark(str(existing.id))
-                    return existing
+                    return existing, True
                 if not store.is_healthy:
-                    return None
+                    return None, False
                 thread = await create_thread()
                 if thread is None:
-                    return None
+                    return None, False
                 if not store.remember(fingerprint, scope, str(thread.id)):
                     logger.warning("Refusing unpersisted Heimdall incident thread")
-                    return None
+                    return None, False
                 self._threads.mark(str(thread.id))
                 # Match generic auto-thread handling: Discord can emit the
                 # new thread's starter message as a second default event with
                 # message.id == thread.id.
                 self._dedup.is_duplicate(str(thread.id))
-                return thread
+                return thread, False
+
+    async def _move_reused_heimdall_alert_to_thread(
+        self, message: Any, thread: Any,
+    ) -> bool:
+        """Copy a repeated alert into its incident thread, then remove the root post.
+
+        Discord cannot move an existing webhook message between channels.  Sending
+        the embed first keeps the alert durable if either API call fails; deleting
+        the parent-channel copy only after that send makes repeated and recovery
+        lifecycle updates appear solely in the original incident thread.
+        """
+        try:
+            await thread.send(
+                embeds=list(getattr(message, "embeds", []) or []),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as exc:
+            logger.warning("Could not copy Heimdall incident update into thread: %s", exc)
+            return False
+        try:
+            await message.delete()
+        except Exception as exc:
+            logger.warning("Could not remove copied Heimdall parent-channel update: %s", exc)
+            return False
+        return True
 
     async def _dispatch_discord_message(self, message: Any) -> bool:
         """Apply Discord ingress policy and dispatch one live event."""
@@ -8361,13 +8386,17 @@ class DiscordAdapter(BasePlatformAdapter):
             if skip_thread or not auto_thread or is_voice_linked_channel:
                 logger.warning("Refusing Heimdall intake without a dedicated incident thread")
                 return False
-            auto_threaded_channel = await self._get_or_create_heimdall_incident_thread(
+            auto_threaded_channel, reused_heimdall_thread = await self._get_or_create_heimdall_incident_thread(
                 heimdall_fingerprint,
                 message,
                 lambda: self._auto_create_thread(message, name_source=heimdall_text),
             )
             if auto_threaded_channel is None:
                 return False
+            if reused_heimdall_thread:
+                await self._move_reused_heimdall_alert_to_thread(
+                    message, auto_threaded_channel,
+                )
             parent_channel_id = str(message.channel.id)
             is_thread = True
             thread_id = str(auto_threaded_channel.id)

@@ -88,6 +88,7 @@ async def test_heimdall_embed_only_alert_reaches_handler_through_required_mentio
             self.parent = ParentChannel()
             self.guild = self.parent.guild
             self.topic = None
+            self.send = AsyncMock()
 
     monkeypatch.setattr(discord_platform.discord, "Thread", IncidentThread, raising=False)
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
@@ -123,7 +124,7 @@ async def test_heimdall_embed_only_alert_reaches_handler_through_required_mentio
     adapter.handle_message = AsyncMock()
 
     def event(message_id, *, webhook_id=100000000000000004, author=None, embeds=None):
-        return SimpleNamespace(
+        message = SimpleNamespace(
             id=message_id,
             guild=ParentChannel().guild,
             channel=ParentChannel(),
@@ -142,19 +143,26 @@ async def test_heimdall_embed_only_alert_reaches_handler_through_required_mentio
             created_at=datetime.now(timezone.utc),
             type=discord_platform.discord.MessageType.default,
         )
+        message.delete = AsyncMock()
+        return message
 
     # The exact webhook principal has no @mention and the configured channel
     # is neither free-response nor threaded-response. It must still reach the
     # handler through the generic mention gate, and a duplicate incident must
     # reuse its dedicated thread rather than creating another one.
     first = event(101)
+    repeated = event(102)
     assert adapter._discord_message_admission(first, claim=False)[0] is True
     assert await adapter._dispatch_discord_message(first) is True
-    assert await adapter._dispatch_discord_message(event(102)) is True
+    assert await adapter._dispatch_discord_message(repeated) is True
     assert adapter._auto_create_thread.await_count == 1
     assert adapter._auto_create_thread.await_args.kwargs["name_source"] == (
         "Database alert\ndatabase unhealthy\nIncident ID\ndatabase-primary"
     )
+    created_thread.send.assert_awaited_once()
+    assert created_thread.send.await_args.kwargs["embeds"] == repeated.embeds
+    first.delete.assert_not_awaited()
+    repeated.delete.assert_awaited_once_with()
     assert adapter.handle_message.await_count == 2
     dispatched = [call.args[0] for call in adapter.handle_message.await_args_list]
     assert [item.source.chat_id for item in dispatched] == [str(created_thread.id)] * 2
@@ -401,13 +409,14 @@ def test_heimdall_corrupt_mapping_stops_intake_before_thread_creation(tmp_path: 
         create_calls += 1
         return SimpleNamespace(id=505)
 
-    actual = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
+    actual, reused = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
         "fingerprint",
         _alert(),
         create_thread,
     ))
 
     assert actual is None
+    assert reused is False
     assert create_calls == 0
     assert state_path.read_text(encoding="utf-8") == original
 
@@ -443,7 +452,8 @@ def test_same_fingerprint_concurrent_alerts_single_flight_thread_creation(tmp_pa
 
     actual = asyncio.run(race())
 
-    assert actual == [created] * 32
+    assert [thread for thread, _reused in actual] == [created] * 32
+    assert sum(reused for _thread, reused in actual) == 31
     assert create_calls == 1
 
 
@@ -462,11 +472,12 @@ def test_new_heimdall_thread_marks_participation_and_seeds_starter_dedup(tmp_pat
     setattr(adapter, "_threads", SimpleNamespace(mark=marked.append))
     setattr(adapter, "_dedup", SimpleNamespace(is_duplicate=seeded.append))
 
-    actual = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
+    (actual, reused) = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
         "fingerprint", _alert(), lambda: _async_value(created),
     ))
 
     assert actual is created
+    assert reused is False
     assert marked == ["505"]
     assert seeded == ["505"]
 
@@ -514,7 +525,8 @@ def test_same_fingerprint_two_adapters_share_one_incident_thread_claim(tmp_path:
 
     actual = asyncio.run(race())
 
-    assert actual == [created, created]
+    assert [thread for thread, _reused in actual] == [created, created]
+    assert sum(reused for _thread, reused in actual) == 1
     assert create_calls == 1
 
 
@@ -557,13 +569,58 @@ def test_reused_heimdall_thread_marks_participation_without_reseeding_dedup(tmp_
     setattr(adapter, "_threads", SimpleNamespace(mark=marked.append))
     setattr(adapter, "_dedup", SimpleNamespace(is_duplicate=seeded.append))
 
-    actual = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
+    actual, was_reused = asyncio.run(adapter._get_or_create_heimdall_incident_thread(
         "fingerprint", _alert(), lambda: _async_value(None),
     ))
 
     assert actual is reused
+    assert was_reused is True
     assert marked == ["505"]
     assert seeded == []
+
+
+def test_reused_heimdall_alert_is_copied_to_thread_before_root_is_deleted():
+    adapter = _adapter(_config())
+    events = []
+    embed = SimpleNamespace(title="운영 이상 회복")
+
+    class Thread:
+        async def send(self, **kwargs):
+            events.append(("send", kwargs))
+
+    class Message:
+        embeds = [embed]
+
+        async def delete(self):
+            events.append(("delete", None))
+
+    moved = asyncio.run(adapter._move_reused_heimdall_alert_to_thread(Message(), Thread()))
+
+    assert moved is True
+    assert events[0][0] == "send"
+    assert events[0][1]["embeds"] == [embed]
+    assert events[1] == ("delete", None)
+
+
+def test_reused_heimdall_alert_keeps_root_when_thread_copy_fails():
+    adapter = _adapter(_config())
+    deleted = False
+
+    class Thread:
+        async def send(self, **_kwargs):
+            raise RuntimeError("send failed")
+
+    class Message:
+        embeds = [SimpleNamespace(title="운영 이상 회복")]
+
+        async def delete(self):
+            nonlocal deleted
+            deleted = True
+
+    moved = asyncio.run(adapter._move_reused_heimdall_alert_to_thread(Message(), Thread()))
+
+    assert moved is False
+    assert deleted is False
 
 
 @pytest.mark.parametrize(

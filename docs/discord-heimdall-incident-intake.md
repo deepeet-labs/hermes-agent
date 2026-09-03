@@ -43,6 +43,11 @@ unsupported platforms fail closed.
 Each created or reused incident thread is marked as participated; newly created
 threads also pre-seed message deduplication with `thread.id` to suppress
 Discord's duplicate thread-starter event.
+After a repeated alert is durably copied into the verified incident thread, its
+standalone parent-channel webhook message is removed. This applies to recovery
+alerts as well, so lifecycle updates remain in the original incident thread.
+If the copy fails, the parent-channel message is retained rather than losing the
+alert.
 
 The bot principal receives only the explicit `toolsets` list intersected with
 the platform's enabled toolsets. It never inherits an owner toolset or private
