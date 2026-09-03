@@ -623,6 +623,43 @@ def test_reused_heimdall_alert_keeps_root_when_thread_copy_fails():
     assert deleted is False
 
 
+def test_reused_heimdall_alert_uses_webhook_delete_without_manage_messages(monkeypatch):
+    adapter = _adapter(_config())
+    adapter._client = SimpleNamespace()
+    webhook = SimpleNamespace(
+        id=100000000000000004,
+        delete_message=AsyncMock(),
+    )
+    monkeypatch.setenv(
+        "DISCORD_HEIMDALL_WEBHOOK_URL",
+        "https://discord.com/api/webhooks/100000000000000004/secret-token",
+    )
+    monkeypatch.setattr(
+        discord_platform.discord.Webhook,
+        "from_url",
+        lambda _url, *, client: webhook,
+    )
+
+    class Thread:
+        async def send(self, **_kwargs):
+            return None
+
+    class Message:
+        id = 100000000000000099
+        embeds = [SimpleNamespace(title="운영 이상 회복")]
+
+        async def delete(self):
+            raise discord_platform.discord.Forbidden(
+                SimpleNamespace(status=403, reason="Forbidden"),
+                {"code": 50013, "message": "Missing Permissions"},
+            )
+
+    moved = asyncio.run(adapter._move_reused_heimdall_alert_to_thread(Message(), Thread()))
+
+    assert moved is True
+    webhook.delete_message.assert_awaited_once_with(Message.id)
+
+
 @pytest.mark.parametrize(
     "thread",
     [None, SimpleNamespace(id=505, parent_id=999, guild=SimpleNamespace(id=101))],

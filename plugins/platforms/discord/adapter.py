@@ -1979,9 +1979,26 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
         try:
             await message.delete()
-        except Exception as exc:
-            logger.warning("Could not remove copied Heimdall parent-channel update: %s", exc)
-            return False
+        except Exception as bot_delete_exc:
+            # Incoming webhook messages can be deleted with that webhook's own
+            # credential even when the bot intentionally lacks Manage Messages.
+            # Verify the secret URL against the admitted webhook principal.
+            webhook_url = os.getenv("DISCORD_HEIMDALL_WEBHOOK_URL", "").strip()
+            config = self._heimdall_incident_config()
+            try:
+                if not webhook_url or self._client is None or config is None:
+                    raise RuntimeError("matching Heimdall webhook credential unavailable")
+                webhook = discord.Webhook.from_url(webhook_url, client=self._client)
+                if str(webhook.id) != str(config["webhook_id"]):
+                    raise RuntimeError("Heimdall webhook credential ID mismatch")
+                await webhook.delete_message(int(message.id))
+            except Exception as webhook_delete_exc:
+                logger.warning(
+                    "Could not remove copied Heimdall parent-channel update: bot=%s webhook=%s",
+                    bot_delete_exc,
+                    webhook_delete_exc,
+                )
+                return False
         return True
 
     async def _dispatch_discord_message(self, message: Any) -> bool:

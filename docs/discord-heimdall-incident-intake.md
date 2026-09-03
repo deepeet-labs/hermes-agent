@@ -48,6 +48,10 @@ standalone parent-channel webhook message is removed. This applies to recovery
 alerts as well, so lifecycle updates remain in the original incident thread.
 If the copy fails, the parent-channel message is retained rather than losing the
 alert.
+When the bot intentionally lacks Discord `Manage Messages`, set the secret
+`DISCORD_HEIMDALL_WEBHOOK_URL` to the same admitted webhook. The adapter verifies
+the URL's webhook ID and uses its credential only to remove that webhook's copied
+parent post.
 
 The bot principal receives only the explicit `toolsets` list intersected with
 the platform's enabled toolsets. It never inherits an owner toolset or private
